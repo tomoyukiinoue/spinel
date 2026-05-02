@@ -23079,6 +23079,11 @@ class Compiler
       return
     end
 
+    # File.foreach(path) { |line| ... }
+    if compile_file_foreach_call_stmt(nid, mname, recv) == 1
+      return
+    end
+
     # Mutating operations: []=, delete, <<, replace, clear, push, reverse!, sort!
     if compile_mutating_call_stmt(nid, mname, recv) == 1
       return
@@ -23219,6 +23224,56 @@ class Compiler
               emit("  fclose(" + ftmp + ");")
               emit("  } }")
               return 1
+            end
+          end
+        end
+      end
+    end
+    0
+  end
+
+  def compile_file_foreach_call_stmt(nid, mname, recv)
+    # File.foreach(path) { |line| ... }
+    # Sugar for File.open(path, "r") { |f| f.each_line { |line| ... } }.
+    # Lowers to a single fopen/fgets/fclose loop with a 4 KB stack buffer
+    # (lines longer than 4095 bytes are split, matching f.each_line).
+    if mname == "foreach"
+      if recv >= 0
+        if @nd_type[recv] == "ConstantReadNode"
+          if @nd_name[recv] == "File"
+            if @nd_block[nid] >= 0
+              args_id = @nd_arguments[nid]
+              if args_id >= 0
+                arg_ids = get_args(args_id)
+                if arg_ids.length == 1
+                  path_expr = compile_expr(arg_ids[0])
+                  blk = @nd_block[nid]
+                  bp = get_block_param(nid, 0)
+                  ftmp = new_temp
+                  ltmp = new_temp
+                  emit("  { FILE *" + ftmp + " = fopen(" + path_expr + ", \"r\");")
+                  emit("  if (" + ftmp + ") {")
+                  emit("    char " + ltmp + "[4096];")
+                  emit("    while (fgets(" + ltmp + ", sizeof(" + ltmp + "), " + ftmp + ")) {")
+                  emit("      const char *lv_" + bp + " = " + ltmp + ";")
+                  push_scope
+                  declare_var(bp, "string")
+                  bbody = @nd_body[blk]
+                  if bbody >= 0
+                    bstmts = get_stmts(bbody)
+                    bk = 0
+                    while bk < bstmts.length
+                      compile_stmt(bstmts[bk])
+                      bk = bk + 1
+                    end
+                  end
+                  pop_scope
+                  emit("    }")
+                  emit("    fclose(" + ftmp + ");")
+                  emit("  } }")
+                  return 1
+                end
+              end
             end
           end
         end
